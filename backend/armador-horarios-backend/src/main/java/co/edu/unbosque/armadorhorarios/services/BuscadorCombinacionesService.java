@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
+import java.util.TreeSet;
+import java.util.LinkedHashMap;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -27,6 +29,7 @@ import co.edu.unbosque.armadorhorarios.repository.SeccionRepository;
 public class BuscadorCombinacionesService {
 
     private static final int LIMITE_MAXIMO_MATERIAS = 8;
+    
 
     @Autowired
     private AsignaturaRepository asignaturaRepo;
@@ -50,7 +53,8 @@ public class BuscadorCombinacionesService {
             return resultado;
         }
 
-        List<Long> idsAsignaturas = request.getAsignaturasIds();
+     // Sin repetidos y en orden de id, para que el resultado no dependa del orden en que se marcaron
+        List<Long> idsAsignaturas = new ArrayList<>(new TreeSet<>(request.getAsignaturasIds()));
 
         // Verificación de Límite Computacional RF-13, RNF-02: máximo 8 asignaturas
         try {
@@ -65,7 +69,8 @@ public class BuscadorCombinacionesService {
         //  Cargar las secciones disponibles y no saturadas para cada asignatura
         List<List<Seccion>> opcionesPorAsignatura = new ArrayList<>();
         List<Asignatura> asignaturasCargadas = new ArrayList<>();
-
+        
+        Map<Long, List<Seccion>> gruposPorRepresentante = new HashMap<>();
         for (Long asigId : idsAsignaturas) {
             Optional<Asignatura> asigOpt = asignaturaRepo.findById(asigId);
             if (asigOpt.isEmpty()) {
@@ -79,7 +84,7 @@ public class BuscadorCombinacionesService {
             asignaturasCargadas.add(asig);
 
             // Filtrar secciones con cupo disponible < 44 inscritos
-            List<Seccion> seccionesValidas = seccionRepo.findByAsignaturaId(asigId).stream()
+            List<Seccion> seccionesValidas = seccionRepo.findByAsignaturaIdOrderByIdAsc(asigId).stream()
                     .filter(s -> !s.estaLlena())
                     .collect(Collectors.toList());
 
@@ -92,7 +97,7 @@ public class BuscadorCombinacionesService {
                 return resultado;
             }
 
-            opcionesPorAsignatura.add(seccionesValidas);
+            opcionesPorAsignatura.add(agruparPorHorario(seccionesValidas, gruposPorRepresentante));
         }
 
      
@@ -122,6 +127,31 @@ public class BuscadorCombinacionesService {
         resultado.setCombinaciones(dtos);
 
         return resultado;
+    }
+    
+    // Texto que identifica el horario de una sección: sus sesiones (día-inicio-fin), ordenadas
+    private String firmaHorario(Seccion seccion) {
+        return seccion.getSesiones().stream()
+                .map(s -> (s.getDia() == null ? "" : s.getDia().trim().toUpperCase())
+                        + "-" + s.getHoraInicio() + "-" + s.getHoraFin())
+                .sorted()
+                .collect(Collectors.joining("|"));
+    }
+
+    // Deja una sola sección (la de menor id) por cada horario distinto.
+    // En 'grupos' guarda, para cada representante, todas las secciones que comparten su horario.
+    private List<Seccion> agruparPorHorario(List<Seccion> secciones, Map<Long, List<Seccion>> grupos) {
+        Map<String, List<Seccion>> porFirma = new LinkedHashMap<>();
+        for (Seccion s : secciones) {
+            porFirma.computeIfAbsent(firmaHorario(s), k -> new ArrayList<>()).add(s);
+        }
+        List<Seccion> representantes = new ArrayList<>();
+        for (List<Seccion> grupo : porFirma.values()) {
+            Seccion representante = grupo.get(0);
+            grupos.put(representante.getId(), grupo);
+            representantes.add(representante);
+        }
+        return representantes;
     }
 
     private void backtrack(List<List<Seccion>> opciones, int nivel, List<Seccion> actual,
@@ -189,8 +219,7 @@ public class BuscadorCombinacionesService {
             }
 
             int spanJornada = maxFin - minInicio;
-            int almuerzo = (minInicio < 13 && maxFin > 14) ? 1 : 0;
-            int huecosDia = Math.max(0, spanJornada - sumaHorasClase - almuerzo);
+            int huecosDia = Math.max(0, spanJornada - sumaHorasClase);
 
             huecosPorDia.put(dia, huecosDia);
             totalHuecosSemana += huecosDia;
